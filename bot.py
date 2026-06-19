@@ -79,24 +79,29 @@ def get_weather(city):
 # -------------------- ИИ (Hugging Face) --------------------
 def ask_huggingface(prompt):
     try:
-        API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+        API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
         headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        # Формируем запрос – для flan-t5 просто текст
         payload = {
-            "inputs": f"<s>[INST] {prompt} [/INST]",
-            "parameters": {"max_new_tokens": 250, "temperature": 0.7}
+            "inputs": prompt,
+            "parameters": {"max_new_tokens": 200, "temperature": 0.7}
         }
-        resp = requests.post(API_URL, headers=headers, json=payload, timeout=40)
-        # Первый запрос может вернуть пустой ответ, пока модель загружается
+        resp = requests.post(API_URL, headers=headers, json=payload, timeout=30)
+        # Если модель ещё грузится (503), скажем об этом
         if resp.status_code == 503:
-            return "Модель загружается, подождите 10–20 секунд и попробуйте ещё раз."
+            return "Нейросеть просыпается, подождите 10 секунд и попробуйте ещё раз."
         if resp.status_code != 200:
-            return "Ошибка при обращении к нейросети."
+            return "Не удалось получить ответ от нейросети."
         result = resp.json()
+        # flan-t5 возвращает список с 'generated_text'
         if isinstance(result, list) and "generated_text" in result[0]:
-            return result[0]["generated_text"].split("[/INST]")[-1].strip()
-        return "Не удалось получить ответ."
+            return result[0]["generated_text"].strip()
+        elif isinstance(result, dict) and "generated_text" in result:
+            return result["generated_text"].strip()
+        else:
+            return "Нейросеть ответила в непонятном формате."
     except Exception:
-        return "Извини, не смог связаться с нейросетью."
+        return "Ошибка связи с нейросетью."
 
 # -------------------- Веб-сервер (чтобы не засыпать) --------------------
 app = Flask(__name__)
