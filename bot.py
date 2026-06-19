@@ -5,20 +5,19 @@ import requests
 from flask import Flask
 from waitress import serve
 
-# -------------------- Ключи из переменных окружения --------------------
+# -------------------- Ключи --------------------
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 WEATHER_TOKEN = os.environ["WEATHER_TOKEN"]
-HF_TOKEN = os.environ["HF_TOKEN"]  # Hugging Face токен
 
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-user_mode = {}  # chat_id -> "weather" или "ai"
+user_mode = {}  # chat_id -> "weather" или None
 
 # Фразы для мгновенного ответа
 PHRASES = {
-    "привет": "Привет! Я бот погоды и искусственного интеллекта.\nВыбери режим на клавиатуре.",
+    "привет": "Привет! Я бот погоды. Нажми кнопку «Погода» и введи город.",
     "здравствуй": "Здравствуй! Чем могу помочь?",
     "как дела": "У меня всё отлично! А у тебя?",
-    "что ты умеешь": "Я могу показать погоду в любом городе и отвечать на вопросы с помощью нейросети Mistral.\nИспользуй кнопки ниже.",
+    "что ты умеешь": "Я показываю погоду в любом городе мира.\nНажми кнопку «Погода» и введи название.",
     "спасибо": "Пожалуйста! Обращайся.",
     "пока": "До встречи!"
 }
@@ -35,10 +34,10 @@ def send_message(chat_id, text, reply_markup=None):
         pass
 
 def get_main_keyboard():
+    """Клавиатура с одной кнопкой «Погода»."""
     return {
         "keyboard": [
-            ["🌤 Погода"],
-            ["🤖 ИИ"]
+            ["🌤 Погода"]
         ],
         "resize_keyboard": True,
         "one_time_keyboard": False
@@ -59,7 +58,7 @@ def get_weather(city):
             data = resp.json()
             msg = data.get("message", "Неизвестная ошибка")
             if msg == "city not found":
-                return None
+                return None  # Город не найден
             return f"Ошибка погоды: {msg}"
         data = resp.json()
         temp = data["main"]["temp"]
@@ -76,34 +75,7 @@ def get_weather(city):
     except Exception:
         return "Не удалось получить данные о погоде."
 
-# -------------------- ИИ (Hugging Face) --------------------
-def ask_huggingface(prompt):
-    try:
-        API_URL = "https://api-inference.huggingface.co/models/google/flan-t5-base"
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-        # Формируем запрос – для flan-t5 просто текст
-        payload = {
-            "inputs": prompt,
-            "parameters": {"max_new_tokens": 200, "temperature": 0.7}
-        }
-        resp = requests.post(API_URL, headers=headers, json=payload, timeout=30)
-        # Если модель ещё грузится (503), скажем об этом
-        if resp.status_code == 503:
-            return "Нейросеть просыпается, подождите 10 секунд и попробуйте ещё раз."
-        if resp.status_code != 200:
-            return "Не удалось получить ответ от нейросети."
-        result = resp.json()
-        # flan-t5 возвращает список с 'generated_text'
-        if isinstance(result, list) and "generated_text" in result[0]:
-            return result[0]["generated_text"].strip()
-        elif isinstance(result, dict) and "generated_text" in result:
-            return result["generated_text"].strip()
-        else:
-            return "Нейросеть ответила в непонятном формате."
-    except Exception:
-        return "Ошибка связи с нейросетью."
-
-# -------------------- Веб-сервер (чтобы не засыпать) --------------------
+# -------------------- Веб-сервер (против сна) --------------------
 app = Flask(__name__)
 
 @app.route('/')
@@ -114,9 +86,9 @@ def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     serve(app, host="0.0.0.0", port=port)
 
-# -------------------- Главный цикл бота --------------------
+# -------------------- Главный цикл --------------------
 def main_bot():
-    print("Бот с погодой, Mistral AI и веб-сервером запущен...")
+    print("Бот погоды (без ИИ) запущен...")
     offset = 0
     while True:
         try:
@@ -139,20 +111,15 @@ def main_bot():
                 # Команда /start – показываем клавиатуру
                 if text == "/start":
                     send_message(chat_id,
-                        "Привет! Выбери режим:\n"
-                        "🌤 Погода – узнать погоду\n"
-                        "🤖 ИИ – задать вопрос нейросети",
+                        "Привет! Я бот погоды.\n"
+                        "Нажми кнопку «🌤 Погода» и введи название города.",
                         reply_markup=get_main_keyboard())
                     continue
 
-                # Нажатия на кнопки
+                # Нажатие кнопки «Погода»
                 if text == "🌤 погода":
                     user_mode[chat_id] = "weather"
                     send_message(chat_id, "Введи название города:")
-                    continue
-                if text == "🤖 ии":
-                    user_mode[chat_id] = "ai"
-                    send_message(chat_id, "Задай любой вопрос:")
                     continue
 
                 # Известные фразы
@@ -166,21 +133,15 @@ def main_bot():
                 if current_mode == "weather":
                     weather_result = get_weather(text)
                     if weather_result is None:
-                        send_message(chat_id, f"Город «{text}» не найден. Попробуй ещё раз.")
+                        send_message(chat_id, f"Город «{text}» не найден. Проверь название и попробуй ещё раз.")
                     else:
                         send_message(chat_id, weather_result)
-                        user_mode.pop(chat_id, None)  # сброс режима
-                    continue
-
-                elif current_mode == "ai":
-                    ai_answer = ask_huggingface(text)
-                    send_message(chat_id, ai_answer)
-                    # оставляем режим, чтобы задать ещё вопрос
+                        user_mode.pop(chat_id, None)  # сброс режима после успеха
                     continue
 
                 else:
-                    # Режим не выбран – напоминаем
-                    send_message(chat_id, "Пожалуйста, выбери режим на клавиатуре.",
+                    # Режим не выбран – напоминаем о кнопке
+                    send_message(chat_id, "Нажми кнопку «🌤 Погода», чтобы узнать погоду.",
                                  reply_markup=get_main_keyboard())
 
         except Exception as e:
@@ -188,7 +149,7 @@ def main_bot():
             time.sleep(1)
 
 if __name__ == "__main__":
-    # Запускаем веб-сервер в фоновом потоке
+    # Flask в отдельном потоке
     threading.Thread(target=run_web_server, daemon=True).start()
-    # Запускаем бота
+    # Основной поток – бот
     main_bot()
