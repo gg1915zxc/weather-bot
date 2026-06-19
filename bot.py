@@ -3,25 +3,22 @@ import time
 import threading
 import requests
 from flask import Flask
-from groq import Groq
+from waitress import serve
 
 # -------------------- Ключи из переменных окружения --------------------
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 WEATHER_TOKEN = os.environ["WEATHER_TOKEN"]
-GROQ_TOKEN = os.environ["GROQ_TOKEN"]
-
-# Клиент Groq
-groq_client = Groq(api_key=GROQ_TOKEN)
+HF_TOKEN = os.environ["HF_TOKEN"]  # Hugging Face токен
 
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 user_mode = {}  # chat_id -> "weather" или "ai"
 
-# Фразы для быстрого ответа
+# Фразы для мгновенного ответа
 PHRASES = {
     "привет": "Привет! Я бот погоды и искусственного интеллекта.\nВыбери режим на клавиатуре.",
     "здравствуй": "Здравствуй! Чем могу помочь?",
     "как дела": "У меня всё отлично! А у тебя?",
-    "что ты умеешь": "Я могу показать погоду в любом городе и отвечать на вопросы с помощью нейросети Groq.\nИспользуй кнопки ниже.",
+    "что ты умеешь": "Я могу показать погоду в любом городе и отвечать на вопросы с помощью нейросети Mistral.\nИспользуй кнопки ниже.",
     "спасибо": "Пожалуйста! Обращайся.",
     "пока": "До встречи!"
 }
@@ -79,20 +76,27 @@ def get_weather(city):
     except Exception:
         return "Не удалось получить данные о погоде."
 
-# -------------------- ИИ (Groq) --------------------
-def ask_groq(prompt):
+# -------------------- ИИ (Hugging Face) --------------------
+def ask_huggingface(prompt):
     try:
-        chat_completion = groq_client.chat.completions.create(
-            messages=[
-                {"role": "user", "content": prompt}
-            ],
-            model="llama3-8b-8192",  # бесплатная модель, быстрая
-            max_tokens=500,
-            temperature=0.7
-        )
-        return chat_completion.choices[0].message.content.strip()
+        API_URL = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.2"
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        payload = {
+            "inputs": f"<s>[INST] {prompt} [/INST]",
+            "parameters": {"max_new_tokens": 250, "temperature": 0.7}
+        }
+        resp = requests.post(API_URL, headers=headers, json=payload, timeout=40)
+        # Первый запрос может вернуть пустой ответ, пока модель загружается
+        if resp.status_code == 503:
+            return "Модель загружается, подождите 10–20 секунд и попробуйте ещё раз."
+        if resp.status_code != 200:
+            return "Ошибка при обращении к нейросети."
+        result = resp.json()
+        if isinstance(result, list) and "generated_text" in result[0]:
+            return result[0]["generated_text"].split("[/INST]")[-1].strip()
+        return "Не удалось получить ответ."
     except Exception:
-        return "Извини, не смог получить ответ от нейросети. Попробуй ещё раз."
+        return "Извини, не смог связаться с нейросетью."
 
 # -------------------- Веб-сервер (чтобы не засыпать) --------------------
 app = Flask(__name__)
@@ -103,12 +107,11 @@ def home():
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    from waitress import serve
     serve(app, host="0.0.0.0", port=port)
 
 # -------------------- Главный цикл бота --------------------
 def main_bot():
-    print("Бот с погодой, Groq и веб-сервером запущен...")
+    print("Бот с погодой, Mistral AI и веб-сервером запущен...")
     offset = 0
     while True:
         try:
@@ -165,7 +168,7 @@ def main_bot():
                     continue
 
                 elif current_mode == "ai":
-                    ai_answer = ask_groq(text)
+                    ai_answer = ask_huggingface(text)
                     send_message(chat_id, ai_answer)
                     # оставляем режим, чтобы задать ещё вопрос
                     continue
@@ -180,7 +183,7 @@ def main_bot():
             time.sleep(1)
 
 if __name__ == "__main__":
-    # Запускаем Flask в фоновом потоке
+    # Запускаем веб-сервер в фоновом потоке
     threading.Thread(target=run_web_server, daemon=True).start()
-    # Основной поток – бот
+    # Запускаем бота
     main_bot()
