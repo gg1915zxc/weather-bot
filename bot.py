@@ -3,24 +3,25 @@ import time
 import threading
 import requests
 from flask import Flask
-import google.generativeai as genai
+from groq import Groq
 
-# -------------------- Ключи --------------------
+# -------------------- Ключи из переменных окружения --------------------
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 WEATHER_TOKEN = os.environ["WEATHER_TOKEN"]
-GEMINI_TOKEN = os.environ["GEMINI_TOKEN"]
+GROQ_TOKEN = os.environ["GROQ_TOKEN"]
 
-genai.configure(api_key=GEMINI_TOKEN)
-model = genai.GenerativeModel("gemini-1.5-flash")
+# Клиент Groq
+groq_client = Groq(api_key=GROQ_TOKEN)
 
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-user_mode = {}
+user_mode = {}  # chat_id -> "weather" или "ai"
 
+# Фразы для быстрого ответа
 PHRASES = {
-    "привет": "Привет! Я бот погоды и искусственного интеллекта.\nВыбери режим на клавиатуре или просто спроси что-нибудь.",
+    "привет": "Привет! Я бот погоды и искусственного интеллекта.\nВыбери режим на клавиатуре.",
     "здравствуй": "Здравствуй! Чем могу помочь?",
     "как дела": "У меня всё отлично! А у тебя?",
-    "что ты умеешь": "Я могу показать погоду в любом городе и отвечать на вопросы с помощью ИИ.\nИспользуй кнопки ниже.",
+    "что ты умеешь": "Я могу показать погоду в любом городе и отвечать на вопросы с помощью нейросети Groq.\nИспользуй кнопки ниже.",
     "спасибо": "Пожалуйста! Обращайся.",
     "пока": "До встречи!"
 }
@@ -49,7 +50,12 @@ def get_main_keyboard():
 # -------------------- Погода --------------------
 def get_weather(city):
     url = "https://api.openweathermap.org/data/2.5/weather"
-    params = {"q": city, "appid": WEATHER_TOKEN, "units": "metric", "lang": "ru"}
+    params = {
+        "q": city,
+        "appid": WEATHER_TOKEN,
+        "units": "metric",
+        "lang": "ru"
+    }
     try:
         resp = requests.get(url, params=params, timeout=10)
         if resp.status_code != 200:
@@ -73,15 +79,22 @@ def get_weather(city):
     except Exception:
         return "Не удалось получить данные о погоде."
 
-# -------------------- Gemini --------------------
-def ask_gemini(prompt):
+# -------------------- ИИ (Groq) --------------------
+def ask_groq(prompt):
     try:
-        response = model.generate_content(prompt)
-        return response.text.strip()
+        chat_completion = groq_client.chat.completions.create(
+            messages=[
+                {"role": "user", "content": prompt}
+            ],
+            model="llama3-8b-8192",  # бесплатная модель, быстрая
+            max_tokens=500,
+            temperature=0.7
+        )
+        return chat_completion.choices[0].message.content.strip()
     except Exception:
-        return "Извини, я не смог придумать ответ. Попробуй ещё раз."
+        return "Извини, не смог получить ответ от нейросети. Попробуй ещё раз."
 
-# -------------------- Веб-сервер для Render --------------------
+# -------------------- Веб-сервер (чтобы не засыпать) --------------------
 app = Flask(__name__)
 
 @app.route('/')
@@ -92,9 +105,9 @@ def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
 
-# -------------------- Основной цикл бота --------------------
+# -------------------- Главный цикл бота --------------------
 def main_bot():
-    print("Бот с кнопками, ИИ и веб-сервером запущен...")
+    print("Бот с погодой, Groq и веб-сервером запущен...")
     offset = 0
     while True:
         try:
@@ -114,53 +127,59 @@ def main_bot():
                 chat_id = message["chat"]["id"]
                 text = message["text"].strip().lower()
 
+                # Команда /start – показываем клавиатуру
                 if text == "/start":
                     send_message(chat_id,
-                        "Привет! Выбери режим на клавиатуре:\n"
-                        "🌤 Погода – узнать погоду в городе\n"
+                        "Привет! Выбери режим:\n"
+                        "🌤 Погода – узнать погоду\n"
                         "🤖 ИИ – задать вопрос нейросети",
                         reply_markup=get_main_keyboard())
                     continue
 
+                # Нажатия на кнопки
                 if text == "🌤 погода":
                     user_mode[chat_id] = "weather"
                     send_message(chat_id, "Введи название города:")
                     continue
                 if text == "🤖 ии":
                     user_mode[chat_id] = "ai"
-                    send_message(chat_id, "Задай мне любой вопрос:")
+                    send_message(chat_id, "Задай любой вопрос:")
                     continue
 
+                # Известные фразы
                 if text in PHRASES:
                     send_message(chat_id, PHRASES[text])
                     continue
 
+                # Обработка по режиму
                 current_mode = user_mode.get(chat_id)
 
                 if current_mode == "weather":
                     weather_result = get_weather(text)
                     if weather_result is None:
-                        send_message(chat_id, f"Город «{text}» не найден. Попробуй ещё раз или смени режим.")
+                        send_message(chat_id, f"Город «{text}» не найден. Попробуй ещё раз.")
                     else:
                         send_message(chat_id, weather_result)
-                        user_mode.pop(chat_id, None)  # сброс режима после успеха
+                        user_mode.pop(chat_id, None)  # сброс режима
                     continue
 
                 elif current_mode == "ai":
-                    ai_answer = ask_gemini(text)
+                    ai_answer = ask_groq(text)
                     send_message(chat_id, ai_answer)
+                    # оставляем режим, чтобы задать ещё вопрос
                     continue
 
                 else:
+                    # Режим не выбран – напоминаем
                     send_message(chat_id, "Пожалуйста, выбери режим на клавиатуре.",
                                  reply_markup=get_main_keyboard())
 
         except Exception as e:
-            print(f"Ошибка в цикле: {e}")
+            print(f"Ошибка цикла: {e}")
             time.sleep(1)
 
 if __name__ == "__main__":
-    # Запускаем Flask в отдельном потоке
+    # Запускаем Flask в фоновом потоке
     threading.Thread(target=run_web_server, daemon=True).start()
-    # Запускаем бота (главный поток)
+    # Основной поток – бот
     main_bot()
