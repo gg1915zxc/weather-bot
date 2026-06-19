@@ -10,9 +10,8 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 WEATHER_TOKEN = os.environ["WEATHER_TOKEN"]
 
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-user_mode = {}  # chat_id -> "weather" или None
+user_mode = {}
 
-# Фразы для мгновенного ответа
 PHRASES = {
     "привет": "Привет! Я бот погоды. Нажми кнопку «Погода» и введи город.",
     "здравствуй": "Здравствуй! Чем могу помочь?",
@@ -34,11 +33,8 @@ def send_message(chat_id, text, reply_markup=None):
         pass
 
 def get_main_keyboard():
-    """Клавиатура с одной кнопкой «Погода»."""
     return {
-        "keyboard": [
-            ["🌤 Погода"]
-        ],
+        "keyboard": [["🌤 Погода"]],
         "resize_keyboard": True,
         "one_time_keyboard": False
     }
@@ -46,19 +42,14 @@ def get_main_keyboard():
 # -------------------- Погода --------------------
 def get_weather(city):
     url = "https://api.openweathermap.org/data/2.5/weather"
-    params = {
-        "q": city,
-        "appid": WEATHER_TOKEN,
-        "units": "metric",
-        "lang": "ru"
-    }
+    params = {"q": city, "appid": WEATHER_TOKEN, "units": "metric", "lang": "ru"}
     try:
         resp = requests.get(url, params=params, timeout=10)
         if resp.status_code != 200:
             data = resp.json()
             msg = data.get("message", "Неизвестная ошибка")
             if msg == "city not found":
-                return None  # Город не найден
+                return None
             return f"Ошибка погоды: {msg}"
         data = resp.json()
         temp = data["main"]["temp"]
@@ -75,7 +66,17 @@ def get_weather(city):
     except Exception:
         return "Не удалось получить данные о погоде."
 
-# -------------------- Веб-сервер (против сна) --------------------
+# -------------------- Self-ping (чтобы Render не усыплял) --------------------
+def self_ping(port):
+    """Каждые 10 минут стучимся к своему же веб-серверу."""
+    while True:
+        time.sleep(600)  # 10 минут
+        try:
+            requests.get(f"http://localhost:{port}/", timeout=5)
+        except Exception:
+            pass
+
+# -------------------- Веб-сервер --------------------
 app = Flask(__name__)
 
 @app.route('/')
@@ -84,11 +85,13 @@ def home():
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
+    # Запускаем self-ping в отдельном потоке
+    threading.Thread(target=self_ping, args=(port,), daemon=True).start()
     serve(app, host="0.0.0.0", port=port)
 
 # -------------------- Главный цикл --------------------
 def main_bot():
-    print("Бот погоды (без ИИ) запущен...")
+    print("Бот погоды (без ИИ, с self-ping) запущен...")
     offset = 0
     while True:
         try:
@@ -108,48 +111,42 @@ def main_bot():
                 chat_id = message["chat"]["id"]
                 text = message["text"].strip().lower()
 
-                # Команда /start – показываем клавиатуру
                 if text == "/start":
                     send_message(chat_id,
-                        "Привет! Я бот погоды.\n"
-                        "Нажми кнопку «🌤 Погода» и введи название города.",
+                        "Привет! Я бот погоды.\nНажми кнопку «🌤 Погода» и введи город.",
                         reply_markup=get_main_keyboard())
                     continue
 
-                # Нажатие кнопки «Погода»
                 if text == "🌤 погода":
                     user_mode[chat_id] = "weather"
                     send_message(chat_id, "Введи название города:")
                     continue
 
-                # Известные фразы
                 if text in PHRASES:
                     send_message(chat_id, PHRASES[text])
                     continue
 
-                # Обработка по режиму
                 current_mode = user_mode.get(chat_id)
 
                 if current_mode == "weather":
                     weather_result = get_weather(text)
                     if weather_result is None:
-                        send_message(chat_id, f"Город «{text}» не найден. Проверь название и попробуй ещё раз.")
+                        send_message(chat_id, f"Город «{text}» не найден. Проверь название.")
                     else:
                         send_message(chat_id, weather_result)
-                        user_mode.pop(chat_id, None)  # сброс режима после успеха
+                        user_mode.pop(chat_id, None)
                     continue
 
                 else:
-                    # Режим не выбран – напоминаем о кнопке
-                    send_message(chat_id, "Нажми кнопку «🌤 Погода», чтобы узнать погоду.",
-                                 reply_markup=get_main_keyboard())
+                    send_message(chat_id,
+                        "Нажми кнопку «🌤 Погода», чтобы узнать погоду.",
+                        reply_markup=get_main_keyboard())
 
         except Exception as e:
             print(f"Ошибка цикла: {e}")
             time.sleep(1)
 
 if __name__ == "__main__":
-    # Flask в отдельном потоке
+    # Flask + self-ping стартуют в run_web_server
     threading.Thread(target=run_web_server, daemon=True).start()
-    # Основной поток – бот
     main_bot()
